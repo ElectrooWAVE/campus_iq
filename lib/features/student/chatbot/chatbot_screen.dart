@@ -91,10 +91,11 @@ class _ChatbotScreenState extends State<ChatbotScreen> {
       }
     } catch (e) {
       debugPrint('Chatbot error: $e');
+      final errMsg = e.toString().replaceFirst('Exception: ', '');
       if (mounted) {
         setState(() {
-          _messages.add(const _ChatMessage(
-            text: 'Unable to reach the AI right now. Please check your internet connection and try again.',
+          _messages.add(_ChatMessage(
+            text: '⚠️ $errMsg',
             isUser: false,
           ));
           _isTyping = false;

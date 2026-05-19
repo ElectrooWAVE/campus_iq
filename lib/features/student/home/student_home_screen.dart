@@ -43,6 +43,7 @@ class _StudentHomeScreenState extends State<StudentHomeScreen>
   AnnouncementModel? _latestAnnouncement;
   int _unreadCount = 0;
   bool _loading = true;
+  String? _error;
 
   @override
   void initState() {
@@ -53,29 +54,64 @@ class _StudentHomeScreenState extends State<StudentHomeScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // Refresh when app comes back to foreground
     if (state == AppLifecycleState.resumed) _load();
   }
 
   Future<void> _load() async {
+    if (!mounted) return;
+
     final auth = context.read<AuthProvider>();
-    final profile = auth.profile!;
+    final profile = auth.profile;
+    if (profile == null) return; // Guard: don't proceed without a profile
 
-    setState(() => _loading = true);
+    if (mounted) setState(() { _loading = true; _error = null; });
+
+    final branch = profile.branch;
+    final year = profile.year ?? 1;
+
+    // Fetch each independently — one failure won't block the others
+    TimetableModel? timetable;
+    List<DeadlineModel> deadlines = [];
+    AnnouncementModel? announcement;
+    int unreadCount = 0;
+
     try {
-      final results = await Future.wait([
-        _timetableRepo.getLatest(profile.branch, profile.year!),
-        _deadlineRepo.getUpcoming(profile.branch, profile.year!, limit: 3),
-        _announcementRepo.getLatest(profile.branch, profile.year!),
-        _notifRepo.getUnreadCount(profile.id),
-      ]);
+      timetable = await _timetableRepo.getLatest(branch, year);
+    } catch (e) {
+      debugPrint('Timetable fetch error: $e');
+    }
 
-      _latestTimetable = results[0] as TimetableModel?;
-      _deadlines = results[1] as List<DeadlineModel>;
-      _latestAnnouncement = results[2] as AnnouncementModel?;
-      _unreadCount = results[3] as int;
+    try {
+      deadlines = await _deadlineRepo.getUpcoming(branch, year, limit: 3);
+    } catch (e) {
+      debugPrint('Deadlines fetch error: $e');
+    }
 
-      // Subscribe to realtime notifications
+    try {
+      announcement = await _announcementRepo.getLatest(branch, year);
+    } catch (e) {
+      debugPrint('Announcement fetch error: $e');
+    }
+
+    try {
+      unreadCount = await _notifRepo.getUnreadCount(profile.id);
+    } catch (e) {
+      debugPrint('Notification count error (non-fatal): $e');
+      unreadCount = 0;
+    }
+
+    if (!mounted) return;
+
+    setState(() {
+      _latestTimetable = timetable;
+      _deadlines = deadlines;
+      _latestAnnouncement = announcement;
+      _unreadCount = unreadCount;
+      _loading = false;
+    });
+
+    // Subscribe to realtime (best-effort)
+    try {
       _realtime.subscribeToNotifications(profile.id, (data) {
         if (mounted) {
           setState(() => _unreadCount++);
@@ -87,9 +123,7 @@ class _StudentHomeScreenState extends State<StudentHomeScreen>
         }
       });
     } catch (e) {
-      debugPrint('Home load error: $e');
-    } finally {
-      if (mounted) setState(() => _loading = false);
+      debugPrint('Realtime subscribe error (non-fatal): $e');
     }
   }
 
@@ -106,7 +140,8 @@ class _StudentHomeScreenState extends State<StudentHomeScreen>
     final profile = auth.profile;
     if (profile == null) return const SizedBox.shrink();
 
-    final urgentAnnouncement = _latestAnnouncement?.priority == 'urgent' ? _latestAnnouncement : null;
+    final urgentAnnouncement =
+        _latestAnnouncement?.priority == 'urgent' ? _latestAnnouncement : null;
 
     return Scaffold(
       body: SafeArea(
@@ -125,7 +160,8 @@ class _StudentHomeScreenState extends State<StudentHomeScreen>
                   children: [
                     Text(
                       '${AppDateUtils.getGreeting()}, ${profile.firstName} 👋',
-                      style: AppTextStyles.h3.copyWith(color: AppColors.textPrimary),
+                      style: AppTextStyles.h3
+                          .copyWith(color: AppColors.textPrimary),
                     ),
                   ],
                 ),
@@ -134,7 +170,8 @@ class _StudentHomeScreenState extends State<StudentHomeScreen>
                     children: [
                       IconButton(
                         icon: const Icon(LucideIcons.bell),
-                        onPressed: () => context.go('/student/notifications'),
+                        onPressed: () =>
+                            context.go('/student/notifications'),
                       ),
                       if (_unreadCount > 0)
                         Positioned(
@@ -150,7 +187,10 @@ class _StudentHomeScreenState extends State<StudentHomeScreen>
                             child: Center(
                               child: Text(
                                 _unreadCount > 9 ? '9+' : '$_unreadCount',
-                                style: const TextStyle(color: Colors.white, fontSize: 8, fontWeight: FontWeight.w700),
+                                style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 8,
+                                    fontWeight: FontWeight.w700),
                               ),
                             ),
                           ),
@@ -188,7 +228,8 @@ class _StudentHomeScreenState extends State<StudentHomeScreen>
                         const SizedBox(height: 16),
                         _UrgentBanner(
                           title: urgentAnnouncement.title,
-                          onDismiss: () => setState(() => _latestAnnouncement = null),
+                          onDismiss: () =>
+                              setState(() => _latestAnnouncement = null),
                         ),
                       ],
 
@@ -201,7 +242,10 @@ class _StudentHomeScreenState extends State<StudentHomeScreen>
                       ),
                       const SizedBox(height: 12),
                       if (_loading)
-                        const SkeletonLoader(width: double.infinity, height: 200, borderRadius: 16)
+                        const SkeletonLoader(
+                            width: double.infinity,
+                            height: 200,
+                            borderRadius: 16)
                       else if (_latestTimetable == null)
                         const EmptyState(message: 'No timetable posted yet')
                       else
@@ -216,24 +260,27 @@ class _StudentHomeScreenState extends State<StudentHomeScreen>
                       ),
                       const SizedBox(height: 12),
                       if (_loading)
-                        ...List.generate(2, (_) => const Padding(
-                          padding: EdgeInsets.only(bottom: 8),
-                          child: SkeletonCard(),
-                        ))
+                        ...List.generate(
+                            2,
+                            (_) => const Padding(
+                                  padding: EdgeInsets.only(bottom: 8),
+                                  child: SkeletonCard(),
+                                ))
                       else if (_deadlines.isEmpty)
                         const EmptyState(message: 'No upcoming deadlines')
                       else
                         ..._deadlines.map((d) => Padding(
-                          padding: const EdgeInsets.only(bottom: 8),
-                          child: _DeadlineListItem(deadline: d),
-                        )),
+                              padding: const EdgeInsets.only(bottom: 8),
+                              child: _DeadlineListItem(deadline: d),
+                            )),
 
                       const SizedBox(height: 24),
 
                       // Latest Announcement
                       _SectionHeader(
                         title: 'Latest Announcement',
-                        onViewAll: () => context.go('/student/announcements'),
+                        onViewAll: () =>
+                            context.go('/student/announcements'),
                       ),
                       const SizedBox(height: 12),
                       if (_loading)
@@ -241,7 +288,8 @@ class _StudentHomeScreenState extends State<StudentHomeScreen>
                       else if (_latestAnnouncement == null)
                         const EmptyState(message: 'No announcements yet')
                       else
-                        _AnnouncementCard(announcement: _latestAnnouncement!),
+                        _AnnouncementCard(
+                            announcement: _latestAnnouncement!),
 
                       const SizedBox(height: 80),
                     ],
@@ -252,7 +300,8 @@ class _StudentHomeScreenState extends State<StudentHomeScreen>
           ),
         ),
       ),
-      bottomNavigationBar: StudentBottomNav(currentIndex: 0, unreadCount: _unreadCount),
+      bottomNavigationBar:
+          StudentBottomNav(currentIndex: 0, unreadCount: _unreadCount),
     );
   }
 }
@@ -274,7 +323,8 @@ class _SectionHeader extends StatelessWidget {
             onTap: onViewAll,
             child: Text(
               'View All',
-              style: AppTextStyles.label.copyWith(color: AppColors.primary),
+              style:
+                  AppTextStyles.label.copyWith(color: AppColors.primary),
             ),
           ),
       ],
@@ -299,14 +349,18 @@ class _UrgentBanner extends StatelessWidget {
       ),
       child: Row(
         children: [
-          const Icon(LucideIcons.alertTriangle, color: AppColors.danger, size: 18),
+          const Icon(LucideIcons.alertTriangle,
+              color: AppColors.danger, size: 18),
           const SizedBox(width: 10),
           Expanded(
-            child: Text(title, style: AppTextStyles.bodyMedium.copyWith(color: AppColors.danger)),
+            child: Text(title,
+                style: AppTextStyles.bodyMedium
+                    .copyWith(color: AppColors.danger)),
           ),
           GestureDetector(
             onTap: onDismiss,
-            child: const Icon(LucideIcons.x, size: 16, color: AppColors.danger),
+            child:
+                const Icon(LucideIcons.x, size: 16, color: AppColors.danger),
           ),
         ],
       ),
@@ -329,14 +383,18 @@ class _TimetableCard extends StatelessWidget {
           GestureDetector(
             onTap: () => ImageViewer.show(context, timetable.imageUrl),
             child: ClipRRect(
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+              borderRadius:
+                  const BorderRadius.vertical(top: Radius.circular(16)),
               child: CachedNetworkImage(
                 imageUrl: timetable.imageUrl,
                 width: double.infinity,
                 height: 200,
                 fit: BoxFit.cover,
-                placeholder: (_, __) => const SkeletonLoader(width: double.infinity, height: 200, borderRadius: 0),
-                errorWidget: (_, __, ___) => const SizedBox(height: 200, child: Center(child: Icon(LucideIcons.image))),
+                placeholder: (_, __) => const SkeletonLoader(
+                    width: double.infinity, height: 200, borderRadius: 0),
+                errorWidget: (_, __, ___) => const SizedBox(
+                    height: 200,
+                    child: Center(child: Icon(LucideIcons.image))),
               ),
             ),
           ),
@@ -349,16 +407,20 @@ class _TimetableCard extends StatelessWidget {
                 const SizedBox(height: 4),
                 Row(
                   children: [
-                    const Icon(LucideIcons.calendar, size: 12, color: AppColors.textMuted),
+                    const Icon(LucideIcons.calendar,
+                        size: 12, color: AppColors.textMuted),
                     const SizedBox(width: 4),
-                    Text(AppDateUtils.formatDate(timetable.effectiveDate),
-                        style: AppTextStyles.caption.copyWith(color: AppColors.textMuted)),
+                    Text(
+                        AppDateUtils.formatDate(timetable.effectiveDate),
+                        style: AppTextStyles.caption
+                            .copyWith(color: AppColors.textMuted)),
                   ],
                 ),
                 if (timetable.description != null) ...[
                   const SizedBox(height: 4),
                   Text(timetable.description!,
-                      style: AppTextStyles.caption.copyWith(color: AppColors.textMuted),
+                      style: AppTextStyles.caption
+                          .copyWith(color: AppColors.textMuted),
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis),
                 ],
@@ -378,10 +440,14 @@ class _DeadlineListItem extends StatelessWidget {
 
   Color get _borderColor {
     switch (deadline.priority) {
-      case 'urgent': return AppColors.danger;
-      case 'high': return AppColors.warning;
-      case 'medium': return AppColors.accent;
-      default: return AppColors.success;
+      case 'urgent':
+        return AppColors.danger;
+      case 'high':
+        return AppColors.warning;
+      case 'medium':
+        return AppColors.accent;
+      default:
+        return AppColors.success;
     }
   }
 
@@ -416,14 +482,16 @@ class _DeadlineListItem extends StatelessWidget {
               ),
             ),
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
               decoration: BoxDecoration(
                 color: _chipColor.withOpacity(0.1),
                 borderRadius: BorderRadius.circular(999),
               ),
               child: Text(
                 AppDateUtils.formatCountdown(deadline.dueDate),
-                style: AppTextStyles.caption.copyWith(color: _chipColor, fontWeight: FontWeight.w600),
+                style: AppTextStyles.caption.copyWith(
+                    color: _chipColor, fontWeight: FontWeight.w600),
               ),
             ),
           ],
@@ -458,7 +526,8 @@ class _AnnouncementCardState extends State<_AnnouncementCard> {
               AppBadge.priority(a.priority),
               const Spacer(),
               Text(AppDateUtils.formatRelative(a.createdAt),
-                  style: AppTextStyles.caption.copyWith(color: AppColors.textMuted)),
+                  style: AppTextStyles.caption
+                      .copyWith(color: AppColors.textMuted)),
             ],
           ),
           const SizedBox(height: 8),
@@ -485,7 +554,8 @@ class _AnnouncementCardState extends State<_AnnouncementCard> {
           const SizedBox(height: 4),
           Text(
             _expanded ? 'Show less' : 'Show more',
-            style: AppTextStyles.caption.copyWith(color: AppColors.primary),
+            style:
+                AppTextStyles.caption.copyWith(color: AppColors.primary),
           ),
         ],
       ),

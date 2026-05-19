@@ -6,7 +6,7 @@ class NotificationRepository {
 
   Future<List<NotificationModel>> getForUser(String userId) async {
     final data = await _client
-        .from('notifications_log')
+        .from('notifications')
         .select()
         .eq('user_id', userId)
         .order('created_at', ascending: false);
@@ -15,7 +15,7 @@ class NotificationRepository {
 
   Future<int> getUnreadCount(String userId) async {
     final data = await _client
-        .from('notifications_log')
+        .from('notifications')
         .select()
         .eq('user_id', userId)
         .eq('is_read', false);
@@ -24,14 +24,14 @@ class NotificationRepository {
 
   Future<void> markRead(String id) async {
     await _client
-        .from('notifications_log')
+        .from('notifications')
         .update({'is_read': true})
         .eq('id', id);
   }
 
   Future<void> markAllRead(String userId) async {
     await _client
-        .from('notifications_log')
+        .from('notifications')
         .update({'is_read': true})
         .eq('user_id', userId)
         .eq('is_read', false);
@@ -43,7 +43,7 @@ class NotificationRepository {
 
   Future<void> deleteByReferenceId(String referenceId) async {
     await _client
-        .from('notifications_log')
+        .from('notifications')
         .delete()
         .eq('reference_id', referenceId);
   }

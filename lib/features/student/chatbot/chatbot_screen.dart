@@ -1,17 +1,14 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:lucide_icons/lucide_icons.dart';
 import 'package:provider/provider.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_text_styles.dart';
-import '../../../core/widgets/app_card.dart';
 import '../../../core/widgets/app_widgets.dart';
-import '../../../data/services/gemini_service.dart';
 import '../../../data/services/groq_service.dart';
-import '../../../data/services/rag_service.dart';
 import '../../auth/providers/auth_provider.dart';
 import '../widgets/student_bottom_nav.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:uuid/uuid.dart';
 
 class ChatbotScreen extends StatefulWidget {
   const ChatbotScreen({super.key});
@@ -23,20 +20,18 @@ class ChatbotScreen extends StatefulWidget {
 class _ChatbotScreenState extends State<ChatbotScreen> {
   final _inputCtrl = TextEditingController();
   final _scrollCtrl = ScrollController();
-  final _ragService = RagService();
-  final _groqService = GroqService();
+  final _groq = GroqService();
   final _client = Supabase.instance.client;
 
   List<_ChatMessage> _messages = [];
   bool _isTyping = false;
-  String? _conversationId;
   List<Map<String, String>> _history = [];
 
   static const _quickChips = [
-    "What's my timetable this week?",
-    'What assignments are due?',
-    'What are the college rules?',
-    'Tell me about upcoming exams',
+    'Give me study tips',
+    'How to manage my time better?',
+    'Tips for exam preparation',
+    'How to stay motivated?',
   ];
 
   @override
@@ -50,7 +45,6 @@ class _ChatbotScreenState extends State<ChatbotScreen> {
     setState(() {
       _messages = [];
       _history = [];
-      _conversationId = null;
     });
   }
 
@@ -67,99 +61,53 @@ class _ChatbotScreenState extends State<ChatbotScreen> {
   }
 
   Future<void> _sendMessage(String text) async {
-    final cleaned = text.trim().replaceAll(RegExp(r'<[^>]*>'), '');
-    if (cleaned.isEmpty || cleaned.length > 500) return;
-
-    final auth = context.read<AuthProvider>();
-    final profile = auth.profile!;
+    final cleaned = text.trim();
+    if (cleaned.isEmpty) return;
 
     setState(() {
       _messages.add(_ChatMessage(text: cleaned, isUser: true));
       _isTyping = true;
-      _inputCtrl.clear();
     });
+    _inputCtrl.clear();
     _scrollToBottom();
 
     try {
-      // RAG: embed → pgvector
-      final context_ = await _ragService.retrieveContext(
-        query: cleaned,
-        branch: profile.branch,
-        year: profile.year!,
-      );
+      final response = await _groq.chat(cleaned, _history);
 
-      String aiResponse;
-      if (context_ == null) {
-        // Fallback — 0 results, skip Groq
-        aiResponse = "I don't have that information. Please contact your ${profile.branch} department office directly.";
-      } else {
-        aiResponse = await _groqService.chatWithGroq(cleaned, context_, _history);
+      _history.add({'role': 'user', 'content': cleaned});
+      _history.add({'role': 'assistant', 'content': response});
+
+      if (mounted) {
+        setState(() {
+          _messages.add(_ChatMessage(
+            text: response,
+            isUser: false,
+            showSave: true,
+            onSave: () => _saveAnswer(cleaned, response),
+          ));
+          _isTyping = false;
+        });
+        _scrollToBottom();
       }
-
-      final userMsg = {'role': 'user', 'content': cleaned};
-      final aiMsg = {'role': 'assistant', 'content': aiResponse};
-      _history.add(userMsg);
-      _history.add(aiMsg);
-
-      setState(() {
-        _messages.add(_ChatMessage(
-          text: aiResponse,
-          isUser: false,
-          showBookmark: true,
-          onBookmark: () => _saveAnswer(cleaned, aiResponse, profile.id),
-        ));
-        _isTyping = false;
-      });
-
-      // Save conversation
-      await _saveConversation(profile.id, userMsg, aiMsg);
-      _scrollToBottom();
     } catch (e) {
-      setState(() {
-        _messages.add(const _ChatMessage(
-          text: "I'm having trouble right now. Try again in a moment.",
-          isUser: false,
-        ));
-        _isTyping = false;
-      });
+      debugPrint('Chatbot error: $e');
+      if (mounted) {
+        setState(() {
+          _messages.add(const _ChatMessage(
+            text: 'Unable to reach the AI right now. Please check your internet connection and try again.',
+            isUser: false,
+          ));
+          _isTyping = false;
+        });
+      }
     }
   }
 
-  Future<void> _saveConversation(
-    String studentId,
-    Map<String, String> userMsg,
-    Map<String, String> aiMsg,
-  ) async {
+  Future<void> _saveAnswer(String question, String answer) async {
     try {
-      if (_conversationId == null) {
-        final result = await _client.from('chatbot_conversations').insert({
-          'student_id': studentId,
-          'messages': [userMsg, aiMsg],
-        }).select().single();
-        _conversationId = result['id'] as String;
-      } else {
-        final existing = await _client
-            .from('chatbot_conversations')
-            .select('messages')
-            .eq('id', _conversationId!)
-            .single();
-        final msgs = List<dynamic>.from(existing['messages'] as List)
-          ..add(userMsg)
-          ..add(aiMsg);
-        await _client.from('chatbot_conversations').update({
-          'messages': msgs,
-          'updated_at': DateTime.now().toIso8601String(),
-        }).eq('id', _conversationId!);
-      }
-    } catch (e) {
-      debugPrint('Save conversation error: $e');
-    }
-  }
-
-  Future<void> _saveAnswer(String question, String answer, String studentId) async {
-    try {
+      final profile = context.read<AuthProvider>().profile!;
       await _client.from('saved_answers').insert({
-        'student_id': studentId,
+        'student_id': profile.id,
         'question': question,
         'answer': answer,
         'saved_at': DateTime.now().toIso8601String(),
@@ -177,12 +125,16 @@ class _ChatbotScreenState extends State<ChatbotScreen> {
     return Scaffold(
       resizeToAvoidBottomInset: true,
       appBar: AppBar(
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back_ios_new_rounded),
+          onPressed: () => context.canPop() ? context.pop() : context.go('/student/home'),
+        ),
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text('CampusIQ Assistant', style: AppTextStyles.h3),
             Text(
-              'Answers only from verified college information',
+              'Powered by Groq AI',
               style: AppTextStyles.caption.copyWith(color: AppColors.textMuted),
             ),
           ],
@@ -220,44 +172,58 @@ class _ChatbotScreenState extends State<ChatbotScreen> {
   }
 
   Widget _buildEmptyState() {
-    return Column(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        Container(
-          width: 64,
-          height: 64,
-          decoration: BoxDecoration(
-            gradient: const LinearGradient(
-              colors: [AppColors.primary, AppColors.secondary],
+    return SingleChildScrollView(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const SizedBox(height: 48),
+          Container(
+            width: 72,
+            height: 72,
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [AppColors.primary, AppColors.secondary],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              ),
+              borderRadius: BorderRadius.circular(22),
             ),
-            borderRadius: BorderRadius.circular(20),
+            child: const Icon(LucideIcons.bot, color: Colors.white, size: 36),
           ),
-          child: const Icon(LucideIcons.bot, color: Colors.white, size: 32),
-        ),
-        const SizedBox(height: 16),
-        Text('Ask me anything about campus', style: AppTextStyles.h3),
-        const SizedBox(height: 8),
-        Text(
-          'I only answer from verified college data',
-          style: AppTextStyles.body.copyWith(color: AppColors.textMuted),
-        ),
-        const SizedBox(height: 24),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            alignment: WrapAlignment.center,
-            children: _quickChips.map((chip) => ActionChip(
-              label: Text(chip, style: AppTextStyles.label.copyWith(color: AppColors.primary)),
-              backgroundColor: AppColors.primary.withOpacity(0.08),
-              onPressed: () => _sendMessage(chip),
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              side: BorderSide(color: AppColors.primary.withOpacity(0.2)),
-            )).toList(),
+          const SizedBox(height: 20),
+          Text('CampusIQ Assistant', style: AppTextStyles.h2),
+          const SizedBox(height: 8),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 40),
+            child: Text(
+              'Ask me anything about college life, studies, or career advice.',
+              style: AppTextStyles.body.copyWith(color: AppColors.textMuted),
+              textAlign: TextAlign.center,
+            ),
           ),
-        ),
-      ],
+          const SizedBox(height: 32),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              alignment: WrapAlignment.center,
+              children: _quickChips
+                  .map((chip) => ActionChip(
+                        label: Text(
+                          chip,
+                          style: AppTextStyles.label.copyWith(color: AppColors.primary),
+                        ),
+                        backgroundColor: AppColors.primary.withOpacity(0.08),
+                        onPressed: () => _sendMessage(chip),
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        side: BorderSide(color: AppColors.primary.withOpacity(0.2)),
+                      ))
+                  .toList(),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -282,6 +248,8 @@ class _ChatbotScreenState extends State<ChatbotScreen> {
               maxLength: 500,
               maxLines: null,
               style: AppTextStyles.body,
+              textInputAction: TextInputAction.send,
+              onSubmitted: _isTyping ? null : _sendMessage,
               decoration: InputDecoration(
                 hintText: 'Ask a question...',
                 counterText: '',
@@ -293,17 +261,17 @@ class _ChatbotScreenState extends State<ChatbotScreen> {
                 filled: true,
                 fillColor: isDark ? const Color(0xFF334155) : const Color(0xFFF1F5F9),
               ),
-              onSubmitted: _sendMessage,
             ),
           ),
           const SizedBox(width: 8),
           GestureDetector(
-            onTap: () => _sendMessage(_inputCtrl.text),
-            child: Container(
+            onTap: _isTyping ? null : () => _sendMessage(_inputCtrl.text),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 200),
               width: 44,
               height: 44,
-              decoration: const BoxDecoration(
-                color: AppColors.primary,
+              decoration: BoxDecoration(
+                color: _isTyping ? AppColors.textMuted : AppColors.primary,
                 shape: BoxShape.circle,
               ),
               child: const Icon(LucideIcons.send, color: Colors.white, size: 18),
@@ -315,17 +283,20 @@ class _ChatbotScreenState extends State<ChatbotScreen> {
   }
 }
 
+// ──────────────────────────────────────────────────────────
+// Message bubble
+// ──────────────────────────────────────────────────────────
 class _ChatMessage extends StatelessWidget {
   final String text;
   final bool isUser;
-  final bool showBookmark;
-  final VoidCallback? onBookmark;
+  final bool showSave;
+  final VoidCallback? onSave;
 
   const _ChatMessage({
     required this.text,
     required this.isUser,
-    this.showBookmark = false,
-    this.onBookmark,
+    this.showSave = false,
+    this.onSave,
   });
 
   @override
@@ -334,8 +305,8 @@ class _ChatMessage extends StatelessWidget {
       return Align(
         alignment: Alignment.centerRight,
         child: Container(
-          margin: const EdgeInsets.only(bottom: 12, left: 48),
-          padding: const EdgeInsets.all(14),
+          margin: const EdgeInsets.only(bottom: 12, left: 56),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
           decoration: BoxDecoration(
             color: AppColors.primary,
             borderRadius: const BorderRadius.only(
@@ -360,63 +331,66 @@ class _ChatMessage extends StatelessWidget {
             height: 32,
             margin: const EdgeInsets.only(right: 8, bottom: 12),
             decoration: BoxDecoration(
-              color: AppColors.secondary,
+              gradient: const LinearGradient(
+                colors: [AppColors.primary, AppColors.secondary],
+              ),
               borderRadius: BorderRadius.circular(999),
             ),
             child: const Center(
-              child: Text('AI', style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w700)),
+              child: Text(
+                'AI',
+                style: TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w700),
+              ),
             ),
           ),
           Flexible(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Container(
-                  margin: const EdgeInsets.only(bottom: 12, right: 48),
-                  padding: const EdgeInsets.all(14),
-                  decoration: BoxDecoration(
-                    color: Theme.of(context).brightness == Brightness.dark
-                        ? AppColors.darkSurface
-                        : AppColors.surface,
-                    border: const Border(
-                      left: BorderSide(color: AppColors.secondary, width: 3),
-                    ),
-                    borderRadius: const BorderRadius.only(
-                      topLeft: Radius.circular(4),
-                      topRight: Radius.circular(18),
-                      bottomLeft: Radius.circular(18),
-                      bottomRight: Radius.circular(18),
-                    ),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.04),
-                        blurRadius: 4,
-                        offset: const Offset(0, 2),
-                      ),
-                    ],
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(text, style: AppTextStyles.body),
-                      if (showBookmark) ...[
-                        const SizedBox(height: 8),
-                        GestureDetector(
-                          onTap: onBookmark,
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Icon(LucideIcons.bookmark, size: 14, color: AppColors.textMuted),
-                              const SizedBox(width: 4),
-                              Text('Save', style: AppTextStyles.caption.copyWith(color: AppColors.textMuted)),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ],
-                  ),
+            child: Container(
+              margin: const EdgeInsets.only(bottom: 12, right: 56),
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: Theme.of(context).brightness == Brightness.dark
+                    ? AppColors.darkSurface
+                    : AppColors.surface,
+                border: const Border(
+                  left: BorderSide(color: AppColors.secondary, width: 3),
                 ),
-              ],
+                borderRadius: const BorderRadius.only(
+                  topLeft: Radius.circular(4),
+                  topRight: Radius.circular(18),
+                  bottomLeft: Radius.circular(18),
+                  bottomRight: Radius.circular(18),
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.04),
+                    blurRadius: 4,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(text, style: AppTextStyles.body),
+                  if (showSave && onSave != null) ...[
+                    const SizedBox(height: 8),
+                    GestureDetector(
+                      onTap: onSave,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(LucideIcons.bookmark, size: 14, color: AppColors.textMuted),
+                          const SizedBox(width: 4),
+                          Text(
+                            'Save answer',
+                            style: AppTextStyles.caption.copyWith(color: AppColors.textMuted),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ],
+              ),
             ),
           ),
         ],
@@ -425,6 +399,9 @@ class _ChatMessage extends StatelessWidget {
   }
 }
 
+// ──────────────────────────────────────────────────────────
+// Animated typing dots indicator
+// ──────────────────────────────────────────────────────────
 class _TypingIndicator extends StatefulWidget {
   const _TypingIndicator();
 
@@ -442,7 +419,7 @@ class _TypingIndicatorState extends State<_TypingIndicator>
     _controllers = List.generate(3, (i) {
       final ctrl = AnimationController(
         vsync: this,
-        duration: const Duration(milliseconds: 600),
+        duration: const Duration(milliseconds: 500),
       );
       Future.delayed(Duration(milliseconds: i * 150), () {
         if (mounted) ctrl.repeat(reverse: true);
@@ -469,9 +446,7 @@ class _TypingIndicatorState extends State<_TypingIndicator>
               ? AppColors.darkSurface
               : AppColors.surface,
           borderRadius: BorderRadius.circular(18),
-          boxShadow: [
-            BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 4),
-          ],
+          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.04), blurRadius: 4)],
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -479,7 +454,7 @@ class _TypingIndicatorState extends State<_TypingIndicator>
             return AnimatedBuilder(
               animation: _controllers[i],
               builder: (_, __) => Container(
-                margin: const EdgeInsets.symmetric(horizontal: 2),
+                margin: const EdgeInsets.symmetric(horizontal: 3),
                 width: 8,
                 height: 8 + _controllers[i].value * 6,
                 decoration: BoxDecoration(

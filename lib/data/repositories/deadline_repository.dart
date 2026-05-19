@@ -5,24 +5,20 @@ class DeadlineRepository {
   final _client = Supabase.instance.client;
 
   Future<List<DeadlineModel>> getAll({int? year, String? branch}) async {
-    var query = _client
-        .from('deadlines')
-        .select();
-
-    if (year != null) {
-      query = query.eq('year', year);
-    }
-    if (branch != null && branch.isNotEmpty) {
-      query = query.eq('branch', branch);
-    }
-
+    var query = _client.from('deadlines').select();
+    if (year != null) query = query.eq('year', year);
+    if (branch != null && branch.isNotEmpty) query = query.eq('branch', branch);
     final data = await query.order('due_date', ascending: true);
     return (data as List).map((e) => DeadlineModel.fromJson(e)).toList();
   }
 
+  /// Returns upcoming deadlines for a branch+year.
+  /// Falls back to all upcoming deadlines if none found for that branch+year.
   Future<List<DeadlineModel>> getUpcoming(String branch, int year, {int limit = 3}) async {
     final now = DateTime.now().toIso8601String();
-    final data = await _client
+
+    // Try exact match first
+    final exact = await _client
         .from('deadlines')
         .select()
         .eq('branch', branch)
@@ -30,7 +26,19 @@ class DeadlineRepository {
         .gte('due_date', now)
         .order('due_date', ascending: true)
         .limit(limit);
-    return (data as List).map((e) => DeadlineModel.fromJson(e)).toList();
+
+    if ((exact as List).isNotEmpty) {
+      return exact.map((e) => DeadlineModel.fromJson(e)).toList();
+    }
+
+    // Fallback: any upcoming deadlines (regardless of branch/year)
+    final any = await _client
+        .from('deadlines')
+        .select()
+        .gte('due_date', now)
+        .order('due_date', ascending: true)
+        .limit(limit);
+    return (any as List).map((e) => DeadlineModel.fromJson(e)).toList();
   }
 
   Future<DeadlineModel> insert(Map<String, dynamic> payload) async {

@@ -10,6 +10,7 @@ import '../features/student/schedule/schedule_screen.dart';
 import '../features/student/notes/notes_screen.dart';
 import '../features/student/deadlines/deadlines_screen.dart';
 import '../features/student/notifications/notifications_screen.dart';
+import '../features/student/announcements/announcements_screen.dart';
 import '../features/student/profile/student_profile_screen.dart';
 import '../features/admin/home/admin_home_screen.dart';
 import '../features/admin/content/admin_content_screen.dart';
@@ -66,6 +67,7 @@ GoRouter createRouter(BuildContext context) {
       GoRoute(path: '/student/deadlines', builder: (_, __) => const DeadlinesScreen()),
       GoRoute(path: '/student/notifications', builder: (_, __) => const NotificationsScreen()),
       GoRoute(path: '/student/profile', builder: (_, __) => const StudentProfileScreen()),
+      GoRoute(path: '/student/announcements', builder: (_, __) => const AnnouncementsScreen()),
 
       // Admin routes
       GoRoute(path: '/admin/home', builder: (_, __) => const AdminHomeScreen()),

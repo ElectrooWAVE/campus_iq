@@ -30,7 +30,8 @@ class StudentHomeScreen extends StatefulWidget {
   State<StudentHomeScreen> createState() => _StudentHomeScreenState();
 }
 
-class _StudentHomeScreenState extends State<StudentHomeScreen> {
+class _StudentHomeScreenState extends State<StudentHomeScreen>
+    with WidgetsBindingObserver {
   final _timetableRepo = TimetableRepository();
   final _deadlineRepo = DeadlineRepository();
   final _announcementRepo = AnnouncementRepository();
@@ -46,7 +47,14 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) => _load());
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Refresh when app comes back to foreground
+    if (state == AppLifecycleState.resumed) _load();
   }
 
   Future<void> _load() async {
@@ -87,6 +95,7 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _realtime.unsubscribe();
     super.dispose();
   }
@@ -224,7 +233,7 @@ class _StudentHomeScreenState extends State<StudentHomeScreen> {
                       // Latest Announcement
                       _SectionHeader(
                         title: 'Latest Announcement',
-                        onViewAll: () => context.go('/student/deadlines'),
+                        onViewAll: () => context.go('/student/announcements'),
                       ),
                       const SizedBox(height: 12),
                       if (_loading)
